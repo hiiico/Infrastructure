@@ -1,0 +1,108 @@
+#version: "3.9"
+services:
+  # Network creation service - runs first and creates the network
+  network-setup:
+    image: alpine:latest
+    container_name: network-setup
+    command: >
+      sh -c "
+        echo 'Waiting for network to be created...' &&
+        sleep 5 &&
+        echo 'Network setup complete'
+      "
+    networks:
+      - app-network
+
+  # MySQL Database Service
+  mysql-db:
+    image: mysql:8.0
+    container_name: shared-mysql-db
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      #      MYSQL_DATABASE: vacation_planning-notifications
+      MYSQL_USER: ${DB_USERNAME}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+    ports:
+      - "3306:3306"  # Expose MySQL to host machine
+    networks:
+      - app-network
+    volumes:
+      - mysql_data:/var/lib/mysql
+      # Optional create databases from:
+      #      LINUX
+      - ./init-wrapper.sh:/docker-entrypoint-initdb.d/init-wrapper.sh
+      #      WINDOWS
+      #      with wrapper
+      #        - ./init-wrapper.cmd:/docker-entrypoint-initdb.d/init-wrapper.cmd
+      #      without wrapper
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+    depends_on:
+      - network-setup
+    healthcheck:
+      test: [ "CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}" ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Kafka Service
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: kafka
+    ports:
+      - "9092:9092"  # Expose Kafka to host machine
+      - "9093:9093"
+    environment:
+      # KRaft Mode Configuration
+      KAFKA_BROKER_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_NODE_ID: 1
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://${KAFKA_BROKER}  # Internal Docker DNS name
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: /kafka-logs
+    networks:
+      - app-network
+    user: "0:0"  # Run as root user
+    volumes:
+      - kafka_data:/kafka-logs
+    restart: unless-stopped
+    depends_on:
+      - network-setup
+    healthcheck:
+      test: [ "CMD", "nc", "-z", "localhost", "9092" ]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+
+  # Optional: Kafka UI for monitoring
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    ports:
+      - "8082:8080"  # Web UI for Kafka monitoring
+    environment:
+      - KAFKA_CLUSTERS_0_NAME=local
+      - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=${KAFKA_BROKER}
+    networks:
+      - app-network
+    depends_on:
+      - network-setup
+      - kafka
+    restart: unless-stopped
+
+networks:
+  app-network:
+    driver: bridge
+    name: app-network
+
+volumes:
+  kafka_data:
+    driver: local
+  mysql_data:
+    driver: local
