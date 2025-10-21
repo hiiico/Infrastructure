@@ -22,8 +22,8 @@ services:
       #      MYSQL_DATABASE: vacation_planning-notifications
       MYSQL_USER: ${DB_USERNAME}
       MYSQL_PASSWORD: ${DB_PASSWORD}
-    ports:
-      - "3306:3306"  # Expose MySQL to host machine
+#    ports:
+#      - "3306:3306"  # Expose MySQL to host machine
     networks:
       - app-network
     volumes:
@@ -49,9 +49,9 @@ services:
   kafka:
     image: apache/kafka:3.7.0
     container_name: kafka
-    ports:
-      - "9092:9092"  # Expose Kafka to host machine
-      - "9093:9093"
+#    ports:
+#      - "9092:9092"  # Expose Kafka to host machine
+#      - "9093:9093"
     environment:
       # KRaft Mode Configuration
       KAFKA_BROKER_ID: 1
