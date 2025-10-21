@@ -26,7 +26,7 @@ docker network ls | grep app-network && docker network rm app-network 2>/dev/nul
 
 # Build and start services
 echo "Starting infrastructure services..."
-docker compose up -d
+docker compose up -d --build
 
 echo ""
 echo "Waiting for services to initialize..."
@@ -36,18 +36,14 @@ echo ""
 echo "==========================================="
 echo "Infrastructure started successfully!"
 echo "==========================================="
-echo "MySQL:       localhost:3306"
-echo "Kafka:       localhost:9092"
+echo "API Gateway: http://localhost/actuator/health"
 echo "Kafka UI:    http://localhost:8082"
-echo ""
-echo "Connection details for external apps:"
-echo "MySQL Host: localhost:3306"
-echo "Kafka Broker: localhost:9092"
-echo "Network: app-network"
+echo "MySQL:       localhost:3306"
 echo ""
 echo "Database credentials in .env file"
 echo "To view logs: docker compose logs -f"
 echo "To stop:      ./stop.sh"
+echo "To test:      ./test-services.sh"
 echo "==========================================="
 
 # Show status

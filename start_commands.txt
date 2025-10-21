@@ -1,0 +1,8 @@
+# Start everything
+./start.sh
+
+# Check health
+./test-services.sh
+
+# Stop everything
+./stop.sh
