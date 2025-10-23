@@ -27,12 +27,13 @@ pipeline {
                 script {
                     withCredentials([file(credentialsId: 'dotenv-file', variable: 'ENV_FILE')]) {
                         // Copy the .env file to workspace
-                        sh "cp $ENV_FILE .env"
-                        sh "chmod 644 .env"  // Ensure proper permissions
-
-                        // Display that .env was loaded (without showing secrets)
-                        echo "✅ .env file loaded successfully"
-                        sh "ls -la .env"
+                        sh '''
+                            echo "Copying .env file..."
+                            cp "$ENV_FILE" .env
+                            chmod 644 .env
+                            ls -la .env
+                            echo ".env file loaded successfully"
+                        '''
                     }
                 }
             }
@@ -43,11 +44,10 @@ pipeline {
                 script {
                     echo "Deploying Infrastructure Services..."
 
-                    // Stop existing infrastructure if running
-                    sh "docker compose -f docker-compose.yml down || true"
-
-                    // Deploy infrastructure with the .env file
-                    sh "docker compose -f docker-compose.yml --env-file .env up -d"
+                    sh '''
+                        docker compose -f docker-compose.yml down || true
+                        docker compose -f docker-compose.yml --env-file .env up -d
+                    '''
 
                     // Wait for services to be healthy
                     waitForInfrastructureServices()
@@ -110,22 +110,16 @@ pipeline {
 def waitForInfrastructureServices() {
     echo "Waiting for infrastructure services to be ready..."
 
-    // Load environment variables from .env file for health checks
-    def envVars = readProperties file: '.env'
-
     // Wait for MySQL
-    timeout(time: 120, unit: 'SECONDS') {
-        waitUntil {
-            try {
-                sh "docker exec shared-mysql-db mysqladmin ping -u root -p${envVars['MYSQL_ROOT_PASSWORD']} --silent"
-                return true
-            } catch (Exception e) {
+    sh '''
+            set +x  # Disable command echoing for security
+            MYSQL_ROOT_PASSWORD=$(grep MYSQL_ROOT_PASSWORD .env | cut -d '=' -f2)
+            until docker exec shared-mysql-db mysqladmin ping -u root -p"$MYSQL_ROOT_PASSWORD" --silent; do
                 echo "Waiting for MySQL..."
                 sleep 5
-                return false
-            }
-        }
-    }
+            done
+            set -x  # Re-enable command echoing
+        '''
 
     // Wait for Kafka
     timeout(time: 180, unit: 'SECONDS') {
@@ -161,15 +155,15 @@ def deployApplication(String appName) {
         ])
 
         // Copy the .env file to application directory
-        sh "cp ../.env ."
+        sh '''
+                    cp ../.env .
+                    docker-compose build --no-cache
+                    docker-compose down || true
+                    docker-compose up -d
+                '''
 
-        // Build and deploy application
-        sh "docker compose build --no-cache"
-        sh "docker compose down || true"
-        sh "docker compose up -d"
-
-        // Wait for application health
-        waitForApplicationHealth(appName)
+                // Wait for application health
+                waitForApplicationHealth(appName)
     }
 }
 
