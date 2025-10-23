@@ -28,7 +28,7 @@ pipeline {
                     withCredentials([file(credentialsId: 'dotenv-file', variable: 'ENV_FILE')]) {
                         // Copy the .env file to workspace
                         sh "cp $ENV_FILE .env"
-                        sh "chmod 644 .env"  # Ensure proper permissions
+                        sh "chmod 644 .env"  // Ensure proper permissions
 
                         // Display that .env was loaded (without showing secrets)
                         echo "✅ .env file loaded successfully"
