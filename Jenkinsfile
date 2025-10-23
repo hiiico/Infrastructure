@@ -3,16 +3,20 @@ pipeline {
 
     parameters {
         choice(
-            name: 'TARGET_APP',
-            choices: ['main-app', 'microservice-app', 'both'],
-            description: 'Which application to deploy after infrastructure'
+            name: 'DEPLOYMENT_MODE',
+            choices: ['deploy', 'destroy', 'status'],
+            description: 'Deploy: Start infrastructure, Destroy: Stop infrastructure, Status: Check status'
+        )
+        booleanParam(
+            name: 'FORCE_REDEPLOY',
+            defaultValue: false,
+            description: 'Force redeploy infrastructure even if already running'
         )
     }
 
     environment {
-        INFRA_REPO = 'https://github.com/hiiico/Infrastructure'
-        MAIN_APP_REPO = 'https://github.com/hiiico/vacation_planning'
-        MICROSERVICE_APP_REPO = 'https://github.com/hiiico/vacation-planning-notifications'
+        DOCKER_COMPOSE_FILE = 'docker-compose.yml'
+        REQUIRED_SERVICES = 'shared-mysql-db,kafka'
     }
 
     stages {
@@ -22,63 +26,100 @@ pipeline {
             }
         }
 
-        stage('Extract .env File') {
+        stage('Load Environment') {
+            when {
+                expression { params.DEPLOYMENT_MODE == 'deploy' }
+            }
             steps {
                 script {
                     withCredentials([file(credentialsId: 'dotenv-file', variable: 'ENV_FILE')]) {
-                        // Copy the .env file to workspace
                         sh '''
-                            echo "Copying .env file..."
+                            echo "Loading environment configuration..."
                             cp "$ENV_FILE" .env
                             chmod 644 .env
-                            ls -la .env
-                            echo ".env file loaded successfully"
+                            echo "Environment file loaded successfully"
                         '''
                     }
                 }
             }
         }
 
+        stage('Check Infrastructure Status') {
+            steps {
+                script {
+                    env.INFRA_STATUS = checkInfrastructureStatus()
+                    echo "Infrastructure Status: ${env.INFRA_STATUS}"
+                }
+            }
+        }
+
+        stage('Destroy Infrastructure') {
+            when {
+                expression { params.DEPLOYMENT_MODE == 'destroy' }
+            }
+            steps {
+                script {
+                    destroyInfrastructure()
+                }
+            }
+        }
+
         stage('Deploy Infrastructure') {
-            steps {
-                script {
-                    echo "Deploying Infrastructure Services..."
-
-                    sh '''
-                        docker compose -f docker-compose.yml down || true
-                        docker compose -f docker-compose.yml --env-file .env up -d
-                    '''
-
-                    // Wait for services to be healthy
-                    waitForInfrastructureServices()
+            when {
+                expression {
+                    params.DEPLOYMENT_MODE == 'deploy' &&
+                    (params.FORCE_REDEPLOY || shouldDeployInfrastructure())
                 }
             }
-        }
-
-        stage('Deploy Applications') {
             steps {
                 script {
-                    def appsToDeploy = []
-
-                    if (params.TARGET_APP == 'both') {
-                        appsToDeploy = ['main-app', 'microservice-app']
-                    } else {
-                        appsToDeploy = [params.TARGET_APP]
-                    }
-
-                    appsToDeploy.each { app ->
-                        deployApplication(app)
+                    echo "Starting infrastructure deployment..."
+                    def deploymentStatus = deployInfrastructureServices()
+                    if (!deploymentStatus) {
+                        error "Infrastructure deployment failed"
                     }
                 }
             }
         }
 
-        stage('Health Check') {
+        stage('Skip Deployment - Already Running') {
+            when {
+                expression {
+                    params.DEPLOYMENT_MODE == 'deploy' &&
+                    !params.FORCE_REDEPLOY &&
+                    !shouldDeployInfrastructure()
+                }
+            }
             steps {
                 script {
-                    // Verify all services are running
-                    sh "docker ps --format 'table {{.Names}}\\t{{.Status}}'"
-                    echo "✅ All services deployed successfully!"
+                    echo "✅ Infrastructure is already running and healthy - skipping deployment"
+                    echo "Using existing infrastructure services"
+                }
+            }
+        }
+
+        stage('Verify Infrastructure Health') {
+            when {
+                expression { params.DEPLOYMENT_MODE == 'deploy' }
+            }
+            steps {
+                script {
+                    echo "Verifying infrastructure health..."
+                    def healthStatus = verifyInfrastructureHealth()
+                    if (!healthStatus) {
+                        error "Infrastructure health check failed"
+                    }
+                }
+            }
+        }
+
+        stage('Display Status') {
+            when {
+                expression { params.DEPLOYMENT_MODE == 'status' }
+            }
+            steps {
+                script {
+                    displayInfrastructureStatus()
                 }
             }
         }
@@ -86,24 +127,157 @@ pipeline {
 
     post {
         always {
-            // Clean up the .env file from workspace
-            sh 'rm -f .env'
             cleanWs()
         }
         success {
-            echo "🚀 Deployment Completed Successfully!"
             script {
-                echo "Access your applications:"
-                echo "Main App: http://localhost:8080"
-                echo "Notification Service: http://localhost:8081"
-                echo "Kafka UI: http://localhost:8082"
+                echo "✅ Infrastructure pipeline completed successfully!"
+                printInfrastructureSummary()
             }
         }
         failure {
-            echo "❌ Deployment Failed!"
-            // Clean up on failure
-            sh "docker compose -f docker-compose.yml down || true"
+            echo "❌ Infrastructure pipeline failed!"
         }
+    }
+}
+
+// ========== INFRASTRUCTURE STATUS FUNCTIONS ==========
+
+def checkInfrastructureStatus() {
+    echo "Checking infrastructure status..."
+
+    try {
+        // Get all running containers
+        def runningContainers = sh(
+            script: "docker ps --format '{{.Names}}'",
+            returnStdout: true
+        ).trim()
+
+        if (runningContainers == '') {
+            return "not-running"
+        }
+
+        def containerList = runningContainers.split('\n')
+        def requiredServices = env.REQUIRED_SERVICES.split(',')
+
+        // Check if all required services are running
+        def missingServices = requiredServices.findAll { !containerList.contains(it) }
+
+        if (missingServices) {
+            return "partial:missing-${missingServices.join(',')}"
+        }
+
+        // Check if services are healthy
+        def healthStatus = checkServicesHealth(requiredServices)
+        if (!healthStatus.healthy) {
+            return "running-but-unhealthy:${healthStatus.unhealthyServices.join(',')}"
+        }
+
+        return "healthy"
+
+    } catch (Exception e) {
+        echo "Error checking infrastructure status: ${e.getMessage()}"
+        return "error"
+    }
+}
+
+def checkServicesHealth(services) {
+    def unhealthyServices = []
+
+    services.each { service ->
+        try {
+            switch(service) {
+                case 'shared-mysql-db':
+                    sh '''
+                        set +x
+                        MYSQL_ROOT_PASSWORD=$(grep MYSQL_ROOT_PASSWORD .env | cut -d '=' -f2)
+                        docker exec shared-mysql-db mysqladmin ping -u root -p"$MYSQL_ROOT_PASSWORD" --silent
+                        set -x
+                    '''
+                    break
+                case 'kafka':
+                    sh '''
+                        # Check if Kafka process is running inside container
+                        docker exec kafka ps aux | grep -q "[k]afka" || exit 1
+                    '''
+                    break
+                default:
+                    // For other services, just check if container is running
+                    sh "docker ps | grep -q ${service}"
+            }
+        } catch (Exception e) {
+            unhealthyServices.add(service)
+        }
+    }
+
+    return [healthy: unhealthyServices.isEmpty(), unhealthyServices: unhealthyServices]
+}
+
+def shouldDeployInfrastructure() {
+    def status = env.INFRA_STATUS
+    echo "Current infrastructure status: ${status}"
+
+    switch(status) {
+        case 'not-running':
+        case 'error':
+            echo "Infrastructure not running or error detected - will deploy"
+            return true
+
+        case ~/^partial:missing-.*/:
+            def missingServices = status.replace('partial:missing-', '').split(',')
+            echo "Missing services: ${missingServices.join(', ')} - will deploy"
+            return true
+
+        case ~/^running-but-unhealthy:.*/:
+            def unhealthyServices = status.replace('running-but-unhealthy:', '').split(',')
+            echo "Unhealthy services: ${unhealthyServices.join(', ')} - will deploy"
+            return true
+
+        case 'healthy':
+            echo "All services are healthy - no deployment needed"
+            return false
+
+        default:
+            echo "Unknown status '${status}' - will deploy for safety"
+            return true
+    }
+}
+
+// ========== DEPLOYMENT FUNCTIONS ==========
+
+def deployInfrastructureServices() {
+    echo "Deploying infrastructure services..."
+
+    try {
+        // Stop only if services are running
+        if (env.INFRA_STATUS != 'not-running') {
+            echo "Stopping existing infrastructure services..."
+            sh "docker compose -f ${env.DOCKER_COMPOSE_FILE} down || true"
+        }
+
+        // Deploy infrastructure
+        sh """
+            docker compose -f ${env.DOCKER_COMPOSE_FILE} --env-file .env up -d
+        """
+
+        // Wait for services to be ready
+        waitForInfrastructureServices()
+        return true
+
+    } catch (Exception e) {
+        echo "Infrastructure deployment failed: ${e.getMessage()}"
+        return false
+    }
+}
+
+def destroyInfrastructure() {
+    echo "Destroying infrastructure services..."
+
+    try {
+        sh "docker compose -f ${env.DOCKER_COMPOSE_FILE} down"
+        echo "✅ Infrastructure services destroyed successfully"
+    } catch (Exception e) {
+        echo "⚠️ Error during infrastructure destruction: ${e.getMessage()}"
     }
 }
 
@@ -111,101 +285,134 @@ def waitForInfrastructureServices() {
     echo "Waiting for infrastructure services to be ready..."
 
     // Wait for MySQL
-    sh '''
-            set +x  # Disable command echoing for security
-            MYSQL_ROOT_PASSWORD=$(grep MYSQL_ROOT_PASSWORD .env | cut -d '=' -f2)
-            until docker exec shared-mysql-db mysqladmin ping -u root -p"$MYSQL_ROOT_PASSWORD" --silent; do
-                echo "Waiting for MySQL..."
-                sleep 5
-            done
-            set -x  # Re-enable command echoing
-        '''
-
-    // Wait for Kafka using container-to-container communication
-        timeout(time: 180, unit: 'SECONDS') {
-            waitUntil {
-                try {
-                    // Check Kafka using internal Docker network
-                    sh '''
-                        #Method 1: Check if Kafka container is running
-                        if ! docker ps | grep kafka | grep -q "Up"; then
-                            echo "Kafka container not running"
-                            exit 1
-                        fi
-
-                        # Method 2: Use netcat inside the Kafka container to check the port
-                        if docker exec kafka nc -z localhost 9092; then
-                            echo "Kafka is listening on port 9092 internally"
-                            # Give Kafka more time to fully initialize
-                            sleep 10
-                            exit 0
-                        else
-                            echo "Kafka port not ready internally"
-                            exit 1
-                        fi
-                    '''
-                    return true
-                } catch (Exception e) {
-                    echo "Waiting for Kafka to be ready..."
-                    sleep 15
-                    return false
-                }
-            }
-        }
-
-        // Additional wait for Kafka to be fully operational
-        echo "Kafka is starting up, waiting for full initialization..."
-        sleep 30
-
-        echo "All infrastructure services are healthy!"
-    }
-
-def deployApplication(String appName) {
-    echo "Deploying ${appName}..."
-
-    dir(appName) {
-        // Checkout the application repository
-        def repoUrl = appName == 'main-app' ? env.MAIN_APP_REPO : env.MICROSERVICE_APP_REPO
-        checkout([
-            $class: 'GitSCM',
-            branches: [[name: "*/main"]],
-            extensions: [],
-            userRemoteConfigs: [[
-                url: repoUrl,
-                credentialsId: 'your-git-credentials'
-            ]]
-        ])
-
-        // Copy the .env file to application directory
-        sh '''
-                    cp ../.env .
-                    docker compose build --no-cache
-                    docker compose down || true
-                    docker compose up -d
-                '''
-
-                // Wait for application health
-                waitForApplicationHealth(appName)
-    }
-}
-
-def waitForApplicationHealth(String appName) {
-    def port = appName == 'main-app' ? '8080' : '8081'
-
-    echo "Waiting for ${appName} to be healthy..."
-
     timeout(time: 120, unit: 'SECONDS') {
         waitUntil {
             try {
-                sh "curl -f http://localhost:${port}/actuator/health"
+                sh '''
+                    set +x
+                    MYSQL_ROOT_PASSWORD=$(grep MYSQL_ROOT_PASSWORD .env | cut -d '=' -f2)
+                    docker exec shared-mysql-db mysqladmin ping -u root -p"$MYSQL_ROOT_PASSWORD" --silent
+                    set -x
+                '''
+                echo "MySQL is ready"
                 return true
             } catch (Exception e) {
-                echo "Waiting for ${appName} at port ${port}..."
+                echo "Waiting for MySQL..."
                 sleep 5
                 return false
             }
         }
     }
 
-    echo "✅ ${appName} is healthy and responding!"
+    // Wait for Kafka
+    timeout(time: 180, unit: 'SECONDS') {
+        waitUntil {
+            try {
+                sh '''
+                    # Check if Kafka container is running and process exists
+                    if docker ps | grep kafka | grep -q "Up" && \
+                       docker exec kafka ps aux | grep -q "[k]afka"; then
+                        echo "Kafka is running"
+                        # Additional initialization time
+                        sleep 20
+                        exit 0
+                    else
+                        exit 1
+                    fi
+                '''
+                return true
+            } catch (Exception e) {
+                echo "Waiting for Kafka..."
+                sleep 15
+                return false
+            }
+        }
+    }
+
+    echo "✅ All infrastructure services are healthy!"
+}
+
+def verifyInfrastructureHealth() {
+    echo "Verifying infrastructure health status..."
+
+    try {
+        def requiredServices = env.REQUIRED_SERVICES.split(',')
+        def healthCheck = checkServicesHealth(requiredServices)
+
+        if (!healthCheck.healthy) {
+            error "Infrastructure health check failed for services: ${healthCheck.unhealthyServices.join(', ')}"
+        }
+
+        echo "✅ All infrastructure services are healthy"
+        return true
+
+    } catch (Exception e) {
+        echo "Infrastructure health check failed: ${e.getMessage()}"
+        return false
+    }
+}
+
+def displayInfrastructureStatus() {
+    echo "=== INFRASTRUCTURE STATUS ==="
+
+    def status = env.INFRA_STATUS
+    switch(status) {
+        case 'not-running':
+            echo "❌ Infrastructure: NOT RUNNING"
+            echo "No infrastructure services are currently running"
+            break
+
+        case 'healthy':
+            echo "✅ Infrastructure: HEALTHY"
+            echo "All services are running and healthy"
+            sh "docker ps --format 'table {{.Names}}\\t{{.Status}}' | grep -E '(${env.REQUIRED_SERVICES})'"
+            break
+
+        case ~/^partial:missing-.*/:
+            def missing = status.replace('partial:missing-', '')
+            echo "⚠️ Infrastructure: PARTIALLY RUNNING"
+            echo "Missing services: ${missing}"
+            sh "docker ps --format 'table {{.Names}}\\t{{.Status}}'"
+            break
+
+        case ~/^running-but-unhealthy:.*/:
+            def unhealthy = status.replace('running-but-unhealthy:', '')
+            echo "⚠️ Infrastructure: RUNNING BUT UNHEALTHY"
+            echo "Unhealthy services: ${unhealthy}"
+            sh "docker ps --format 'table {{.Names}}\\t{{.Status}}'"
+            break
+
+        default:
+            echo "❓ Infrastructure: UNKNOWN STATUS"
+            echo "Status: ${status}"
+    }
+
+    echo "============================="
+}
+
+def printInfrastructureSummary() {
+    def summary = """
+    🏗️  INFRASTRUCTURE SUMMARY
+    =========================
+    Mode: ${params.DEPLOYMENT_MODE.toUpperCase()}
+    Status: ${env.INFRA_STATUS}
+    """
+
+    if (params.DEPLOYMENT_MODE == 'deploy') {
+        if (env.SHOULD_DEPLOY_INFRA == 'true') {
+            summary += "Action: ✅ Deployed successfully\n"
+        } else {
+            summary += "Action: ⏭️  Skipped (already running)\n"
+        }
+    } else if (params.DEPLOYMENT_MODE == 'destroy') {
+        summary += "Action: 🗑️  Destroyed\n"
+    }
+
+    summary += """
+    Services: ${env.REQUIRED_SERVICES}
+    Kafka UI: http://localhost:8082
+    =========================
+    """
+
+    echo summary
 }
