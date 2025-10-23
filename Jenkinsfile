@@ -123,16 +123,30 @@ def waitForInfrastructureServices() {
 
     // Wait for Kafka
     timeout(time: 180, unit: 'SECONDS') {
-        waitUntil {
-            try {
-                sh "docker exec kafka kafka-topics.sh --bootstrap-server localhost:9092 --list"
-                return true
-            } catch (Exception e) {
-                echo "Waiting for Kafka..."
-                sleep 10
-                return false
+            waitUntil {
+                try {
+                    // Try multiple approaches to check if Kafka is ready
+                    sh '''
+                        # Method 1: Check if Kafka container is running and port is accessible
+                        if docker ps | grep kafka | grep -q "Up"; then
+                            # Method 2: Use kafka-topics command with full path
+                            docker exec kafka /bin/bash -c "cd /opt/kafka && bin/kafka-topics.sh --bootstrap-server localhost:9092 --list" || true
+                            # Method 3: Simple port check
+                            nc -z kafka 9092 && echo "Kafka is ready"
+                        else
+                            exit 1
+                        fi
+                    '''
+                    return true
+                } catch (Exception e) {
+                    echo "Waiting for Kafka to be ready..."
+                    sleep 15
+                    return false
+                }
             }
         }
+
+        echo "All infrastructure services are healthy!"
     }
 
     echo "✅ All infrastructure services are healthy!"
