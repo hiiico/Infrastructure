@@ -127,7 +127,7 @@ def waitForInfrastructureServices() {
                 try {
                     // Check Kafka using internal Docker network
                     sh '''
-                        Method 1: Check if Kafka container is running
+                        #Method 1: Check if Kafka container is running
                         if ! docker ps | grep kafka | grep -q "Up"; then
                             echo "Kafka container not running"
                             exit 1
