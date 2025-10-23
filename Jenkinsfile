@@ -121,19 +121,26 @@ def waitForInfrastructureServices() {
             set -x  # Re-enable command echoing
         '''
 
-    // Wait for Kafka
-    timeout(time: 180, unit: 'SECONDS') {
+    // Wait for Kafka using container-to-container communication
+        timeout(time: 180, unit: 'SECONDS') {
             waitUntil {
                 try {
-                    // Try multiple approaches to check if Kafka is ready
+                    // Check Kafka using internal Docker network
                     sh '''
-                        # Method 1: Check if Kafka container is running and port is accessible
-                        if docker ps | grep kafka | grep -q "Up"; then
-                            # Method 2: Use kafka-topics command with full path
-                            docker exec kafka /bin/bash -c "cd /opt/kafka && bin/kafka-topics.sh --bootstrap-server localhost:9092 --list" || true
-                            # Method 3: Simple port check
-                            nc -z kafka 9092 && echo "Kafka is ready"
+                        Method 1: Check if Kafka container is running
+                        if ! docker ps | grep kafka | grep -q "Up"; then
+                            echo "Kafka container not running"
+                            exit 1
+                        fi
+
+                        # Method 2: Use netcat inside the Kafka container to check the port
+                        if docker exec kafka nc -z localhost 9092; then
+                            echo "Kafka is listening on port 9092 internally"
+                            # Give Kafka more time to fully initialize
+                            sleep 10
+                            exit 0
                         else
+                            echo "Kafka port not ready internally"
                             exit 1
                         fi
                     '''
@@ -146,11 +153,12 @@ def waitForInfrastructureServices() {
             }
         }
 
+        // Additional wait for Kafka to be fully operational
+        echo "Kafka is starting up, waiting for full initialization..."
+        sleep 30
+
         echo "All infrastructure services are healthy!"
     }
-
-    echo "✅ All infrastructure services are healthy!"
-}
 
 def deployApplication(String appName) {
     echo "Deploying ${appName}..."
