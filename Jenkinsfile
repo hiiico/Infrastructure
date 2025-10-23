@@ -179,9 +179,9 @@ def deployApplication(String appName) {
         // Copy the .env file to application directory
         sh '''
                     cp ../.env .
-                    docker-compose build --no-cache
-                    docker-compose down || true
-                    docker-compose up -d
+                    docker compose build --no-cache
+                    docker compose down || true
+                    docker compose up -d
                 '''
 
                 // Wait for application health
